@@ -1,0 +1,11 @@
+.DS_Store
+*.crx
+*.pem
+*.zip
+dist/
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.claude/
