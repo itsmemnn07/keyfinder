@@ -13,9 +13,15 @@ async function init() {
 
   const response = await chrome.runtime.sendMessage({ type: "getFindings" });
   allFindings = response.findings || [];
+  let allRecon = {};
+  const reconResp = await chrome.runtime.sendMessage({ type: "getRecon" });
+  allRecon = (reconResp && reconResp.recon) || {};
+  window.__kfReconCache = allRecon;
+  renderRecon(allRecon);
 
   populateFilters();
   renderStats();
+  renderAnalytics();
   renderFindings();
   renderTicker();
   firstRenderDone = true;
@@ -23,9 +29,15 @@ async function init() {
   document.getElementById("severityFilter").addEventListener("change", renderFindings);
   document.getElementById("typeFilter").addEventListener("change", renderFindings);
   document.getElementById("providerFilter").addEventListener("change", renderFindings);
+  document.getElementById("statusFilter").addEventListener("change", renderFindings);
+  document.getElementById("groupBySelect").addEventListener("change", renderFindings);
   document.getElementById("searchBox").addEventListener("input", renderFindings);
   document.getElementById("exportJsonBtn").addEventListener("click", exportJson);
   document.getElementById("exportCsvBtn").addEventListener("click", exportCsv);
+  document.getElementById("exportReportBtn").addEventListener("click", exportMarkdownReport);
+  document.getElementById("exportCfgBtn").addEventListener("click", exportConfig);
+  document.getElementById("importCfgBtn").addEventListener("click", () => document.getElementById("importCfgInput").click());
+  document.getElementById("importCfgInput").addEventListener("change", importConfig);
   document.getElementById("clearBtn").addEventListener("click", clearAll);
 
   const searchBox = document.getElementById("searchBox");
@@ -71,7 +83,7 @@ function renderSkeleton() {
     const tr = document.createElement("tr");
     tr.className = "skl-row";
     const td = document.createElement("td");
-    td.colSpan = 10;
+    td.colSpan = 12;
     const bar = document.createElement("div");
     bar.className = "skl " + widths[i % widths.length];
     td.appendChild(bar);
@@ -84,12 +96,14 @@ function getFiltered() {
   const severity = document.getElementById("severityFilter").value;
   const type = document.getElementById("typeFilter").value;
   const provider = document.getElementById("providerFilter").value;
+  const status = document.getElementById("statusFilter").value;
   const search = document.getElementById("searchBox").value.toLowerCase();
 
   return allFindings.filter((f) => {
     if (severity !== "all" && f.severity !== severity) return false;
     if (type !== "all" && f.type !== type) return false;
     if (provider !== "all" && f.provider !== provider) return false;
+    if (status !== "all" && (f.status || "open") !== status) return false;
     if (search && !JSON.stringify(f).toLowerCase().includes(search)) return false;
     return true;
   });
@@ -122,6 +136,7 @@ function renderStats() {
   const high = allFindings.filter((f) => f.severity === "high").length;
   const medium = allFindings.filter((f) => f.severity === "medium").length;
   const low = allFindings.filter((f) => f.severity === "low").length;
+  const info = allFindings.filter((f) => f.severity === "info").length;
   const domains = new Set(allFindings.map((f) => f.domain)).size;
 
   bar.innerHTML = "";
@@ -131,6 +146,7 @@ function renderStats() {
     { label: "High", value: high, cls: "stat-high", filter: "high" },
     { label: "Medium", value: medium, cls: "stat-medium", filter: "medium" },
     { label: "Low", value: low, cls: "stat-low", filter: "low" },
+    { label: "Info", value: info, cls: "stat-info", filter: "info" },
     { label: "Domains", value: domains, cls: "stat-domains", filter: null },
   ];
   for (const s of stats) {
@@ -200,9 +216,32 @@ function renderFindings() {
   empty.hidden = true;
 
   const severityOrder = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
-  filtered.sort((a, b) => (severityOrder[a.severity] ?? 5) - (severityOrder[b.severity] ?? 5));
+  filtered.sort((a, b) => {
+    const sevDiff = (severityOrder[a.severity] ?? 5) - (severityOrder[b.severity] ?? 5);
+    if (sevDiff !== 0) return sevDiff;
+    return (b.riskScore ?? -1) - (a.riskScore ?? -1);
+  });
+
+  const groupBy = document.getElementById("groupBySelect").value;
+  let lastGroupKey = null;
 
   filtered.forEach((f, i) => {
+    if (groupBy !== "none") {
+      const gKey = groupBy === "domain" ? (f.domain || "unknown") : (f.patternName || "unknown");
+      if (gKey !== lastGroupKey) {
+        lastGroupKey = gKey;
+        const groupItems = filtered.filter((x) => (groupBy === "domain" ? (x.domain || "unknown") : (x.patternName || "unknown")) === gKey);
+        const maxRisk = Math.max(...groupItems.map((x) => typeof x.riskScore === "number" ? x.riskScore : 0));
+        const gTr = document.createElement("tr");
+        gTr.className = "group-row";
+        const gTd = document.createElement("td");
+        gTd.colSpan = 12;
+        gTd.textContent = `${groupBy}: ${gKey} (${groupItems.length} finding${groupItems.length === 1 ? "" : "s"} · max risk ${maxRisk})`;
+        gTr.appendChild(gTd);
+        tbody.appendChild(gTr);
+      }
+    }
+
     const sev = f.severity || "medium";
     const tr = document.createElement("tr");
     tr.className = "sev-" + sev;
@@ -218,6 +257,19 @@ function renderFindings() {
     badge.textContent = sev.toUpperCase();
     tdSev.appendChild(badge);
 
+    const tdRisk = document.createElement("td");
+    const riskEl = document.createElement("span");
+    riskEl.className = "risk-score";
+    riskEl.textContent = typeof f.riskScore === "number" ? String(f.riskScore) : "-";
+    tdRisk.appendChild(riskEl);
+
+    const tdConf = document.createElement("td");
+    const confVal = (f.confidence || "medium").toLowerCase();
+    const confEl = document.createElement("span");
+    confEl.className = `conf-badge conf-${confVal}`;
+    confEl.textContent = confVal;
+    tdConf.appendChild(confEl);
+
     const tdProvider = document.createElement("td");
     tdProvider.textContent = f.provider || "-";
     tdProvider.className = "td-provider";
@@ -225,14 +277,26 @@ function renderFindings() {
     const tdPattern = document.createElement("td");
     tdPattern.textContent = f.patternName || "-";
     tdPattern.className = "td-pattern";
+    if ((f.occurrenceCount || 1) > 1) {
+      const occ = document.createElement("span");
+      occ.className = "occ-badge";
+      occ.textContent = `×${f.occurrenceCount}`;
+      occ.title = `Seen ${f.occurrenceCount} times`;
+      tdPattern.appendChild(occ);
+    }
 
     const tdMatch = document.createElement("td");
     const matchCode = document.createElement("code");
-    matchCode.textContent = f.match || "-";
+    const rawMatch = f.match || "-";
+    const maskedMatch = typeof KeyFinderUtils !== "undefined" && f.match
+      ? KeyFinderUtils.maskSecret(f.match)
+      : rawMatch;
+    let isRevealed = false;
+    matchCode.textContent = maskedMatch;
     matchCode.className = "match-value";
-    matchCode.title = "click to copy\n" + (f.match || "");
+    matchCode.title = "click to copy";
     matchCode.addEventListener("click", () => {
-      navigator.clipboard.writeText(f.match || "");
+      navigator.clipboard.writeText(rawMatch);
       flashCopied(copyBtn);
     });
     tdMatch.appendChild(matchCode);
@@ -289,11 +353,47 @@ function renderFindings() {
       renderTicker();
     });
 
+    const statusSelect = document.createElement("select");
+    statusSelect.className = "status-select";
+    statusSelect.title = "Finding lifecycle status";
+    for (const st of ["open", "acknowledged", "false_positive", "resolved"]) {
+      const opt = document.createElement("option");
+      opt.value = st;
+      opt.textContent = st;
+      if ((f.status || "open") === st) opt.selected = true;
+      statusSelect.appendChild(opt);
+    }
+    statusSelect.addEventListener("change", async () => {
+      const nextStatus = statusSelect.value;
+      await chrome.runtime.sendMessage({ type: "updateFindingStatus", findingId: f.id, status: nextStatus });
+      f.status = nextStatus;
+    });
+
+    const revealBtn = document.createElement("button");
+    revealBtn.className = "btn-icon";
+    revealBtn.textContent = "show";
+    revealBtn.title = "Reveal or mask secret value";
+    revealBtn.addEventListener("click", () => {
+      isRevealed = !isRevealed;
+      matchCode.textContent = isRevealed ? rawMatch : maskedMatch;
+      revealBtn.textContent = isRevealed ? "mask" : "show";
+    });
+
+    const whyBtn = document.createElement("button");
+    whyBtn.className = "btn-icon";
+    whyBtn.textContent = "why";
+    whyBtn.title = "View risk factors & remediation";
+
+    tdActions.appendChild(statusSelect);
+    tdActions.appendChild(revealBtn);
+    tdActions.appendChild(whyBtn);
     tdActions.appendChild(copyBtn);
     tdActions.appendChild(delBtn);
 
     tr.appendChild(tdNum);
     tr.appendChild(tdSev);
+    tr.appendChild(tdRisk);
+    tr.appendChild(tdConf);
     tr.appendChild(tdProvider);
     tr.appendChild(tdPattern);
     tr.appendChild(tdMatch);
@@ -303,7 +403,90 @@ function renderFindings() {
     tr.appendChild(tdTime);
     tr.appendChild(tdActions);
     tbody.appendChild(tr);
+
+    const detailRow = buildDetailRow(f);
+    detailRow.hidden = true;
+    whyBtn.addEventListener("click", () => {
+      detailRow.hidden = !detailRow.hidden;
+      whyBtn.textContent = detailRow.hidden ? "why" : "hide";
+    });
+    tbody.appendChild(detailRow);
   });
+}
+
+function buildDetailRow(f) {
+  const tr = document.createElement("tr");
+  tr.className = "detail-row";
+  const td = document.createElement("td");
+  td.colSpan = 12;
+
+  const grid = document.createElement("div");
+  grid.className = "detail-grid";
+
+  // Left box: Context & Risk Factors
+  const left = document.createElement("div");
+  left.className = "detail-box";
+  const leftTitle = document.createElement("div");
+  leftTitle.className = "detail-title";
+  leftTitle.textContent = "Context & Risk Breakdown";
+  left.appendChild(leftTitle);
+
+  const ctx = f.context || {};
+  const meta = document.createElement("div");
+  meta.className = "detail-meta";
+  meta.textContent = `env: ${ctx.environment || "unknown"} · surface: ${f.type || "-"} · key: ${ctx.keyName || "-"} · occurrences: ${f.occurrenceCount || 1}`;
+  left.appendChild(meta);
+
+  if (ctx.snippet) {
+    const snip = document.createElement("code");
+    snip.className = "detail-snippet";
+    snip.textContent = ctx.snippet;
+    left.appendChild(snip);
+  }
+
+  const factorsList = document.createElement("ul");
+  factorsList.className = "detail-list";
+  const factors = Array.isArray(f.riskFactors) && f.riskFactors.length > 0
+    ? f.riskFactors
+    : ["Legacy finding (no context score recorded)"];
+  for (const factor of factors) {
+    const li = document.createElement("li");
+    li.textContent = factor;
+    factorsList.appendChild(li);
+  }
+  left.appendChild(factorsList);
+
+  // Right box: Remediation Guidance
+  const right = document.createElement("div");
+  right.className = "detail-box";
+  const rem = typeof KeyFinderRemediation !== "undefined"
+    ? KeyFinderRemediation.getRemediation(f)
+    : { title: "Remediation", summary: "Verify and rotate if active.", steps: [] };
+
+  const rightTitle = document.createElement("div");
+  rightTitle.className = "detail-title";
+  rightTitle.textContent = rem.title;
+  right.appendChild(rightTitle);
+
+  const summary = document.createElement("div");
+  summary.className = "detail-meta";
+  summary.textContent = rem.summary;
+  right.appendChild(summary);
+
+  const stepsList = document.createElement("ul");
+  stepsList.className = "detail-list";
+  for (const step of rem.steps) {
+    const li = document.createElement("li");
+    li.textContent = step;
+    stepsList.appendChild(li);
+  }
+  right.appendChild(stepsList);
+
+  grid.appendChild(left);
+  grid.appendChild(right);
+  td.appendChild(grid);
+  tr.appendChild(td);
+  return tr;
 }
 
 function flashCopied(btn) {
@@ -377,7 +560,12 @@ function formatTime(ts) {
 }
 
 function exportJson() {
-  const filtered = getFiltered();
+  const mask = document.getElementById("maskExportToggle")?.checked ?? true;
+  const filtered = getFiltered().map((f) =>
+    mask && typeof KeyFinderUtils !== "undefined" && f.match
+      ? { ...f, match: KeyFinderUtils.maskSecret(f.match) }
+      : f
+  );
   const blob = new Blob([JSON.stringify(filtered, null, 2)], { type: "application/json" });
   downloadBlob(blob, `keyfinder-findings-${Date.now()}.json`);
 }
@@ -390,17 +578,23 @@ function csvSafe(value) {
 }
 
 function exportCsv() {
+  const mask = document.getElementById("maskExportToggle")?.checked ?? true;
   const filtered = getFiltered();
-  const headers = ["Severity", "Provider", "Pattern", "Match", "Type", "Domain", "URL", "Page URL", "Timestamp"];
+  const headers = ["Severity", "Risk Score", "Confidence", "Status", "Environment", "Provider", "Pattern", "Match", "Type", "Domain", "URL", "Page URL", "Risk Factors", "Timestamp"];
   const rows = filtered.map((f) => [
     csvSafe(f.severity),
+    csvSafe(typeof f.riskScore === "number" ? f.riskScore : ""),
+    csvSafe(f.confidence || ""),
+    csvSafe(f.status || "open"),
+    csvSafe((f.context && f.context.environment) || ""),
     csvSafe(f.provider),
     csvSafe(f.patternName),
-    csvSafe(f.match),
+    csvSafe(mask && typeof KeyFinderUtils !== "undefined" && f.match ? KeyFinderUtils.maskSecret(f.match) : f.match),
     csvSafe(f.type),
     csvSafe(f.domain),
     csvSafe(f.url),
     csvSafe(f.pageUrl),
+    csvSafe(Array.isArray(f.riskFactors) ? f.riskFactors.join(" | ") : ""),
     csvSafe(f.timestamp ? new Date(f.timestamp).toISOString() : ""),
   ]);
   const csv = [headers.join(","), ...rows.map((r) => r.join(","))].join("\n");
@@ -420,8 +614,183 @@ function downloadBlob(blob, filename) {
 async function clearAll() {
   if (!confirm("Remove all findings?")) return;
   await chrome.runtime.sendMessage({ type: "clearFindings" });
+  await chrome.runtime.sendMessage({ type: "clearRecon" });
   allFindings = [];
   renderStats();
   renderFindings();
   renderTicker();
+  renderRecon({});
+}
+
+function renderAnalytics() {
+  const container = document.getElementById("analyticsContainer");
+  const meta = document.getElementById("analyticsMeta");
+  if (!container) return;
+  container.innerHTML = "";
+
+  const scored = allFindings.filter((f) => typeof f.riskScore === "number");
+  const avgRisk = scored.length > 0
+    ? Math.round(scored.reduce((s, f) => s + f.riskScore, 0) / scored.length)
+    : 0;
+  if (meta) meta.textContent = `${allFindings.length} findings · avg risk ${avgRisk}/100`;
+
+  const countTop = (keyFn) => {
+    const counts = new Map();
+    for (const f of allFindings) {
+      const k = keyFn(f) || "unknown";
+      counts.set(k, (counts.get(k) || 0) + 1);
+    }
+    return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5);
+  };
+
+  const renderBox = (titleText, entries) => {
+    const box = document.createElement("div");
+    box.className = "detail-box";
+    const t = document.createElement("div");
+    t.className = "detail-title";
+    t.textContent = titleText;
+    box.appendChild(t);
+
+    if (entries.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "detail-meta";
+      empty.textContent = "No data yet.";
+      box.appendChild(empty);
+      return box;
+    }
+
+    const max = entries[0][1] || 1;
+    for (const [label, count] of entries) {
+      const row = document.createElement("div");
+      row.className = "bar-row";
+      const lbl = document.createElement("span");
+      lbl.className = "bar-label";
+      lbl.textContent = label;
+      lbl.title = label;
+      const track = document.createElement("div");
+      track.className = "bar-track";
+      const fill = document.createElement("div");
+      fill.className = "bar-fill";
+      fill.style.width = `${Math.max(6, Math.round((count / max) * 100))}%`;
+      track.appendChild(fill);
+      const val = document.createElement("span");
+      val.className = "bar-val";
+      val.textContent = String(count);
+      row.append(lbl, track, val);
+      box.appendChild(row);
+    }
+    return box;
+  };
+
+  container.appendChild(renderBox("Top Domains", countTop((f) => f.domain)));
+  container.appendChild(renderBox("Exposure Surfaces", countTop((f) => f.type)));
+}
+
+function exportMarkdownReport() {
+  const mask = document.getElementById("maskExportToggle")?.checked ?? true;
+  const filtered = getFiltered();
+  const counts = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
+  for (const f of filtered) counts[f.severity || "medium"] = (counts[f.severity || "medium"] || 0) + 1;
+  const reconEntries = Object.values(window.__kfReconCache || {});
+
+  const lines = [
+    "# KeyFinder Security Assessment Report",
+    "",
+    `Generated: ${new Date().toISOString()}`,
+    "",
+    "## Executive Summary",
+    `- **Total Findings (Filtered):** ${filtered.length}`,
+    `- **Severity Breakdown:** Critical: ${counts.critical}, High: ${counts.high}, Medium: ${counts.medium}, Low: ${counts.low}, Info: ${counts.info}`,
+    `- **Recon Domains Recorded:** ${reconEntries.length}`,
+    "",
+    "## Findings",
+    "",
+    "| Severity | Risk | Confidence | Status | Provider | Pattern | Match | Domain |",
+    "|---|---:|---|---|---|---|---|---|",
+    ...filtered.slice(0, 100).map((f) => {
+      const m = mask && typeof KeyFinderUtils !== "undefined" && f.match ? KeyFinderUtils.maskSecret(f.match) : (f.match || "-");
+      return `| ${(f.severity || "medium").toUpperCase()} | ${f.riskScore ?? "-"} | ${f.confidence || "-"} | ${f.status || "open"} | ${f.provider || "-"} | ${f.patternName || "-"} | \`${String(m).replace(/\|/g, "\\|")}\` | ${f.domain || "-"} |`;
+    }),
+  ];
+
+  const blob = new Blob([lines.join("\n")], { type: "text/markdown" });
+  downloadBlob(blob, `keyfinder-report-${Date.now()}.md`);
+}
+
+async function exportConfig() {
+  const [kwResp, setResp] = await Promise.all([
+    chrome.runtime.sendMessage({ type: "getKeywords" }),
+    chrome.runtime.sendMessage({ type: "getSettings" }),
+  ]);
+  const payload = {
+    version: 1,
+    keywords: (kwResp && kwResp.keywords) || [],
+    settings: (setResp && setResp.settings) || { paused: false, excludedDomains: [] },
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  downloadBlob(blob, `keyfinder-config-${Date.now()}.json`);
+}
+
+async function importConfig(e) {
+  const file = e.target.files && e.target.files[0];
+  if (!file) return;
+  try {
+    const parsed = JSON.parse(await file.text());
+    if (parsed.settings) {
+      await chrome.runtime.sendMessage({ type: "updateSettings", patch: parsed.settings });
+    }
+    if (Array.isArray(parsed.keywords)) {
+      for (const kw of parsed.keywords) {
+        await chrome.runtime.sendMessage({ type: "addKeyword", keyword: String(kw) });
+      }
+    }
+    alert("Configuration imported.");
+  } catch {
+    alert("Invalid configuration JSON file.");
+  } finally {
+    e.target.value = "";
+  }
+}
+
+function renderRecon(reconMap) {
+  const container = document.getElementById("reconContainer");
+  const meta = document.getElementById("reconMeta");
+  if (!container) return;
+  const entries = Object.values(reconMap || {});
+  if (meta) meta.textContent = `${entries.length} domain${entries.length === 1 ? "" : "s"}`;
+  if (entries.length === 0) {
+    container.textContent = "No passive recon data recorded yet.";
+    return;
+  }
+  container.innerHTML = "";
+  for (const item of entries) {
+    const box = document.createElement("div");
+    box.className = "detail-box";
+    box.style.marginBottom = "10px";
+
+    const title = document.createElement("div");
+    title.className = "detail-title";
+    title.textContent = `${item.domain} · ${(item.thirdPartyScripts || []).length} 3p scripts · ${(item.sourceMaps || []).length} source maps · ${(item.endpoints || []).length} endpoints`;
+    box.appendChild(title);
+
+    if (item.thirdPartyScripts && item.thirdPartyScripts.length > 0) {
+      const p = document.createElement("div");
+      p.className = "detail-meta";
+      p.textContent = "3rd-party scripts: " + item.thirdPartyScripts.map((s) => `${s.origin}${s.hasSri ? " [SRI]" : " [no-SRI]"}`).join(", ");
+      box.appendChild(p);
+    }
+    if (item.sourceMaps && item.sourceMaps.length > 0) {
+      const p = document.createElement("div");
+      p.className = "detail-meta";
+      p.textContent = "Source maps: " + item.sourceMaps.map((m) => m.mapUrl).join(", ");
+      box.appendChild(p);
+    }
+    if (item.endpoints && item.endpoints.length > 0) {
+      const p = document.createElement("div");
+      p.className = "detail-meta";
+      p.textContent = "Endpoints: " + item.endpoints.slice(0, 15).join(", ") + (item.endpoints.length > 15 ? ` (+${item.endpoints.length - 15} more)` : "");
+      box.appendChild(p);
+    }
+    container.appendChild(box);
+  }
 }

@@ -5,6 +5,10 @@ const SECRET_PATTERNS = [
   { name: "AWS MWS Auth Token", re: /amzn\.mws\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g, severity: "critical", confidence: "high", provider: "AWS" },
   { name: "AWS Cognito Pool ID", re: /(?:us|eu|ap|sa|ca|me|af)-(?:east|west|south|north|central|southeast|northeast)-[0-9]:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g, severity: "medium", confidence: "high", provider: "AWS" },
   { name: "AWS AppSync GraphQL Key", re: /da2-[a-z0-9]{26}/g, severity: "high", confidence: "high", provider: "AWS" },
+  { name: "AWS S3 Bucket URL", re: /https?:\/\/[a-z0-9.-]+\.s3(?:[.-][a-z0-9-]+)?\.amazonaws\.com(?:\/[^\s'"<>]*)?/gi, severity: "low", confidence: "high", provider: "AWS" },
+  { name: "AWS S3 URI", re: /\bs3:\/\/[a-z0-9][a-z0-9.-]{1,61}[a-z0-9](?:\/[^\s'"<>]*)?/gi, severity: "low", confidence: "high", provider: "AWS" },
+  { name: "Google Cloud Storage Bucket", re: /https?:\/\/storage\.(?:googleapis|cloud\.google)\.com\/[a-z0-9._-]+(?:\/[^\s'"<>]*)?/gi, severity: "low", confidence: "high", provider: "Google" },
+  { name: "Azure Blob Storage URL", re: /https?:\/\/[a-z0-9-]+\.blob\.core\.windows\.net(?:\/[^\s'"<>]*)?/gi, severity: "low", confidence: "high", provider: "Azure" },
   { name: "AWS Session Token", re: /(?:aws_session_token|AWS_SESSION_TOKEN)\s*[:=]\s*['"]?([A-Za-z0-9/+=]{100,})['"]?/gi, severity: "critical", confidence: "high", provider: "AWS" },
 
   { name: "Google API Key", re: /\bAIza[0-9A-Za-z_-]{35}\b/g, severity: "high", confidence: "high", provider: "Google" },
@@ -17,7 +21,7 @@ const SECRET_PATTERNS = [
 
   { name: "Azure Storage Account Key", re: /(?:AccountKey|azure_storage_key|AZURE_STORAGE_KEY)\s*[:=]\s*['"]?([A-Za-z0-9/+=]{88})['"]?/gi, severity: "critical", confidence: "high", provider: "Azure" },
   { name: "Azure Connection String", re: /DefaultEndpointsProtocol=https?;AccountName=[^;]+;AccountKey=[A-Za-z0-9/+=]{88}/g, severity: "critical", confidence: "high", provider: "Azure" },
-  { name: "Azure SAS Token", re: /[?&]sig=[A-Za-z0-9%/+=]+&/g, severity: "high", confidence: "medium", provider: "Azure" },
+  { name: "Azure SAS Token", re: /[?&]sig=[A-Za-z0-9%/+=]{12,}(?=&|$)/g, severity: "high", confidence: "medium", provider: "Azure" },
 
   { name: "GitHub Personal Access Token", re: /\bghp_[A-Za-z0-9_]{36,}\b/g, severity: "critical", confidence: "high", provider: "GitHub" },
   { name: "GitHub OAuth Access Token", re: /\bgho_[A-Za-z0-9_]{36,}\b/g, severity: "critical", confidence: "high", provider: "GitHub" },

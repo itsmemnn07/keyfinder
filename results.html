@@ -26,8 +26,16 @@
           <kbd class="kbd" title="Press / to focus search">/</kbd>
         </div>
         <div class="btn-group">
+          <label class="mask-toggle" title="Mask secret values in JSON/CSV exports">
+            <input type="checkbox" id="maskExportToggle" checked>
+            <span>Mask Exports</span>
+          </label>
           <button id="exportJsonBtn" class="btn btn-secondary" title="Download filtered findings as JSON">&darr; JSON</button>
           <button id="exportCsvBtn" class="btn btn-secondary" title="Download filtered findings as CSV">&darr; CSV</button>
+          <button id="exportReportBtn" class="btn btn-secondary" title="Download Markdown security report">&darr; Report</button>
+          <button id="exportCfgBtn" class="btn btn-secondary" title="Export keywords and scope settings">Export Cfg</button>
+          <button id="importCfgBtn" class="btn btn-secondary" title="Import keywords and scope settings">Import Cfg</button>
+          <input type="file" id="importCfgInput" accept=".json,application/json" hidden>
           <button id="clearBtn" class="btn btn-danger" title="Remove all findings">&times; Clear</button>
         </div>
       </div>
@@ -42,6 +50,7 @@
             <option value="high">high</option>
             <option value="medium">medium</option>
             <option value="low">low</option>
+            <option value="info">info</option>
           </select>
         </label>
         <label class="filter">
@@ -54,6 +63,24 @@
           <span class="filter-label">provider</span>
           <select id="providerFilter">
             <option value="all">all</option>
+          </select>
+        </label>
+        <label class="filter">
+          <span class="filter-label">status</span>
+          <select id="statusFilter">
+            <option value="all">all</option>
+            <option value="open">open</option>
+            <option value="acknowledged">acknowledged</option>
+            <option value="false_positive">false_positive</option>
+            <option value="resolved">resolved</option>
+          </select>
+        </label>
+        <label class="filter">
+          <span class="filter-label">group</span>
+          <select id="groupBySelect">
+            <option value="none">none</option>
+            <option value="domain">domain</option>
+            <option value="pattern">pattern</option>
           </select>
         </label>
       </div>
@@ -70,6 +97,11 @@
   </div>
 
   <main class="main">
+    <div class="table-shell titled" style="margin-bottom: 18px;">
+      <span class="titled-label">analytics.log</span>
+      <span class="titled-meta" id="analyticsMeta">summary</span>
+      <div id="analyticsContainer" class="analytics-grid"></div>
+    </div>
     <div class="table-shell titled">
       <span class="titled-label">findings.log</span>
       <span class="titled-meta" id="shellMeta"></span>
@@ -78,6 +110,8 @@
           <tr>
             <th>#</th>
             <th>Severity</th>
+            <th>Risk</th>
+            <th>Conf</th>
             <th>Provider</th>
             <th>Pattern</th>
             <th>Match</th>
@@ -105,6 +139,11 @@
         <p class="empty-hint">tip · add custom keywords from the extension popup</p>
       </div>
     </div>
+    <div class="table-shell titled" style="margin-top: 18px;">
+      <span class="titled-label">recon.log</span>
+      <span class="titled-meta" id="reconMeta">0 domains</span>
+      <div id="reconContainer" style="padding: 12px 14px; font-size: 11px; color: var(--text-dim);">No passive recon data recorded yet.</div>
+    </div>
     <footer class="page-footer">
       <span>local storage only</span>
       <span class="footer-sep">·</span>
@@ -114,6 +153,8 @@
     </footer>
   </main>
 
+  <script src="js/utils.js"></script>
+  <script src="js/remediation.js"></script>
   <script src="js/results.js"></script>
 </body>
 </html>

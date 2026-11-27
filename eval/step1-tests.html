@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>KeyFinder Step 1 Unit Tests</title>
+  <style>
+    body { font-family: ui-monospace, monospace; background: #05070c; color: #d6dde8; padding: 24px; max-width: 860px; margin: 0 auto; }
+    h1 { font-size: 16px; margin-bottom: 12px; color: #fff; }
+    .summary { padding: 10px 14px; border: 1px solid #1a2233; background: #090d14; margin-bottom: 16px; }
+    .pass { color: #3ddc97; }
+    .fail { color: #ff5c5c; }
+    ul { list-style: none; padding: 0; }
+    li { padding: 6px 10px; border-bottom: 1px solid #1a2233; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h1>KeyFinder — Step 1 Context, Risk &amp; Remediation Unit Tests</h1>
+  <div id="summary" class="summary">Running...</div>
+  <ul id="results"></ul>
+
+  <script src="../js/utils.js"></script>
+  <script src="../js/context.js"></script>
+  <script src="../js/risk.js"></script>
+  <script src="../js/remediation.js"></script>
+  <script>
+    (function () {
+      const resultsEl = document.getElementById("results");
+      const summaryEl = document.getElementById("summary");
+      let passed = 0;
+      let failed = 0;
+
+      function assert(condition, name, detail = "") {
+        const li = document.createElement("li");
+        if (condition) {
+          passed++;
+          li.className = "pass";
+          li.textContent = "PASS: " + name;
+        } else {
+          failed++;
+          li.className = "fail";
+          li.textContent = "FAIL: " + name + (detail ? " -> " + detail : "");
+        }
+        resultsEl.appendChild(li);
+      }
+
+      const C = window.KeyFinderContext;
+      const R = window.KeyFinderRisk;
+      const M = window.KeyFinderRemediation;
+
+      assert(Boolean(C && R && M), "Context, Risk, and Remediation globals exist");
+
+      // 1. Environment classification
+      assert(C.classifyEnvironment("http://127.0.0.1:8765/").environment === "localhost", "127.0.0.1 classified as localhost");
+      assert(C.classifyEnvironment("https://github.com/org/repo").environment === "docs-example", "github.com classified as docs-example");
+      assert(C.classifyEnvironment("https://staging.acme.io/app").environment === "dev-staging", "staging subdomain classified as dev-staging");
+      assert(C.classifyEnvironment("https://app.acme.io/checkout").environment === "production", "public app classified as production");
+
+      // 2. Stripe live vs test key risk differentiation
+      const stripeLiveSample = "sk_live_" + "RealProdKey00000000000000000000";
+      const prodLive = R.evaluateFinding(
+        { match: stripeLiveSample, type: "inline-script", patternName: "Stripe Secret Key", severity: "critical", confidence: "high", provider: "Stripe" },
+        C.analyzeContext({ match: stripeLiveSample, pageUrl: "https://app.acme.io/", type: "inline-script", patternName: "Stripe Secret Key", provider: "Stripe" })
+      );
+      const prodTest = R.evaluateFinding(
+        { match: "sk_test_51MockKeyForLocalTesting1234", type: "inline-script", patternName: "Stripe Secret Key", severity: "critical", confidence: "high", provider: "Stripe" },
+        C.analyzeContext({ match: "sk_test_51MockKeyForLocalTesting1234", pageUrl: "https://app.acme.io/", type: "inline-script", patternName: "Stripe Secret Key", provider: "Stripe" })
+      );
+      assert(prodLive.riskLevel === "critical" && prodLive.riskScore >= 80, "Live Stripe key on prod scores critical", String(prodLive.riskScore));
+      assert(prodTest.riskScore < prodLive.riskScore && prodTest.riskLevel !== "critical", "Stripe sk_test_ is downgraded below critical", `${prodTest.riskLevel} (${prodTest.riskScore})`);
+      assert(prodTest.confidence === "high", "Stripe sk_test_ keeps high format confidence");
+
+      // 3. Expired JWT vs active JWT
+      const header = btoa(JSON.stringify({ alg: "HS256", typ: "JWT" })).replace(/=/g, "");
+      const expiredPayload = btoa(JSON.stringify({ sub: "123", exp: 1000000 })).replace(/=/g, "");
+      const expiredJwt = `${header}.${expiredPayload}.signature_part_123456`;
+      const jwtCtx = C.analyzeContext({ match: expiredJwt, pageUrl: "https://app.acme.io/", type: "web-storage", patternName: "JSON Web Token", provider: "JWT" });
+      assert(jwtCtx.jwtMeta && jwtCtx.jwtMeta.expired === true, "inspectJwt detects expired exp claim");
+
+      // 4. Context snippet redaction
+      const textCtx = C.extractTextContext('const apiKey = "AIzaSyDummyTestKey000000000000000000000";', 16, 39, "AIzaSyDummyTestKey000000000000000000000");
+      assert(!textCtx.snippet.includes("AIzaSyDummyTestKey"), "extractTextContext redacts secret with [MATCH]");
+      assert(textCtx.keyName === "apiKey", "extractTextContext infers keyName", textCtx.keyName);
+
+      // 5. Remediation lookup
+      const rem = M.getRemediation(prodLive);
+      assert(rem && Array.isArray(rem.steps) && rem.steps.length >= 2, "getRemediation returns actionable steps");
+
+      summaryEl.textContent = `${passed} passed, ${failed} failed`;
+      summaryEl.className = "summary " + (failed === 0 ? "pass" : "fail");
+    })();
+  </script>
+</body>
+</html>

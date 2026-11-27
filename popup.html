@@ -16,7 +16,7 @@
         <h1>KEYFINDER<span class="version" id="versionLabel"></span></h1>
         <p class="header-tagline">passive secret discovery</p>
       </div>
-      <span class="live-badge" title="Passive scanning is active"><span class="live-dot"></span>ARMED</span>
+      <span class="live-badge" id="liveBadge" title="Passive scanning is active"><span class="live-dot"></span><span id="liveBadgeText">ARMED</span></span>
     </div>
   </header>
 
@@ -29,6 +29,14 @@
       <span class="stat-top"><span class="stat-led" aria-hidden="true"></span><span class="stat-label">Keywords</span></span>
       <span class="stat-number" id="keywordCount">&ndash;</span>
     </div>
+  </section>
+
+  <section class="section scope-section">
+    <div class="scope-actions">
+      <button type="button" id="pauseBtn" class="scope-btn">Pause Scan</button>
+      <button type="button" id="excludeSiteBtn" class="scope-btn" disabled>Exclude Site</button>
+    </div>
+    <ul id="excludedList" class="excluded-list"></ul>
   </section>
 
   <section class="section">
