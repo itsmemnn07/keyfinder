@@ -56,6 +56,19 @@
     <ul id="keywordList" class="keyword-list"></ul>
   </section>
 
+  <section class="section external-section">
+    <h2 class="section-title">External Reputation</h2>
+    <label>
+      <input type="checkbox" id="externalEnable" /> Enable external checks (global toggle)
+    </label>
+    <br/>
+    <label>
+      <input type="checkbox" id="autoCheck" /> Automatic check for critical/high findings
+    </label>
+    <div id="providersContainer" style="margin-top:8px;">
+      <!-- Provider rows will be populated by popup.js -->
+    </div>
+  </section>
   <footer class="footer">
     <div class="term-line" aria-live="polite"><span class="term-text" id="termText"></span><span class="term-cursor" aria-hidden="true"></span></div>
     <a href="results.html" target="_blank" id="resultsLink" class="results-btn">

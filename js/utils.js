@@ -98,6 +98,8 @@
       riskLevel: raw.riskLevel || severity,
       riskFactors: Array.isArray(raw.riskFactors) ? raw.riskFactors : [],
       context: raw.context || null,
+      reconResults: Array.isArray(raw.reconResults) ? raw.reconResults : [],
+      duplicateGroupId: raw.duplicateGroupId || null,
     };
   }
 
