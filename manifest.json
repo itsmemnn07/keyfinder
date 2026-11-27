@@ -52,6 +52,6 @@
     "*://api.securitytrails.com/*",
     "*://api.shodan.io/*",
     "*://censys.io/*"
-  ],
+  ]
 
 }
