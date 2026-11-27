@@ -62,15 +62,22 @@ Additionally, **Shannon entropy analysis** is applied to detect random high-entr
 ## Features
 
 - **Zero dependencies** - Pure vanilla JavaScript, no jQuery, no external libraries
+- **Zero network egress** - All analysis, scoring, and JWT inspection run locally in-browser
 - **Manifest V3** - Built for modern Chrome and Firefox with service worker architecture
+- **Context-aware risk scoring** - Computes 0–100 risk score, confidence level, environment classification (`production`, `dev-staging`, `localhost`, `docs-example`), and placeholder/test detection
+- **Explainable findings & remediation** - Expandable `why` drawer with redacted context snippet, risk factors, and provider-specific remediation steps
+- **Privacy & scope controls** - Secrets masked by default with per-row reveal, `Mask Exports` toggle, Pause/Resume scan toggle, and per-domain exclusion list
+- **Finding lifecycle & grouping** - Status tracking (`open`, `acknowledged`, `false-positive`, `resolved`), repeat occurrence counter (`×N`), and grouping by domain or pattern
+- **Passive reconnaissance** - Detects source map references, high-signal API/auth/webhook endpoints, third-party script origins with SRI status, and cloud storage asset URLs
+- **Analytics & reporting** - Top domains and exposure surface charts, Markdown executive report export, and JSON settings/keywords import & export
 - **Passive scanning** - Runs automatically on every page load
 - **SPA-aware** - MutationObserver re-scans dynamically injected DOM
 - **Per-tab alert badge** - Red-dot icon overlay when a tab has findings
 - **Custom keywords** - Add your own search terms to scan for (validated, 50 max)
 - **Ops-console dashboard** - Flat terminal UI: severity-sorted findings, click-to-filter severity tiles, latest-finding ticker, and live search (`/` focuses, `Esc` clears)
 - **One-click triage** - Click any match chip to copy the secret, relative timestamps with absolute on hover, per-finding delete
-- **Export** - Download filtered findings as JSON or CSV (with formula-injection sanitiser)
-- **Hardened bridge** - Per-page nonce on MAIN <-> ISOLATED CustomEvent channel
+- **Export** - Download filtered findings as JSON, CSV (with formula-injection sanitiser), or Markdown report
+- **Hardened bridge** - Per-page nonce on MAIN <-> ISOLATED CustomEvent channel with early-event buffering
 - **Bounded storage** - 5000-finding cap with FIFO eviction; serialised writes across tabs
 - **Low footprint** - Minimal CPU and memory usage
 - **All frames** - Scans iframes and embedded content
@@ -123,13 +130,23 @@ keyFinder/
   popup.html               # Extension popup UI
   results.html             # Findings dashboard
   js/
-    background.js          # Service worker - storage and message handling
-    patterns.js            # 80+ secret detection regex patterns
+    utils.js               # Pure helpers, Shannon entropy, masking, Schema v2 normalization
+    background.js          # Service worker - storage, settings, recon, and message handling
+    patterns.js            # 80+ secret & cloud asset detection regex patterns
+    context.js             # Context extraction, environment & placeholder detection, local JWT inspection
+    risk.js                # Risk scoring (0-100), confidence classification, risk factors
+    recon.js               # Passive recon: source maps, endpoints, third-party script inventory
+    remediation.js         # Provider- and surface-specific remediation guidance
     content.js             # ISOLATED-world page scanner - DOM, scripts, network
-    interceptor-loader.js  # ISOLATED loader - sets nonce, injects MAIN-world interceptor
+    interceptor-loader.js  # ISOLATED loader - sets nonce, buffers early events, injects interceptor
     interceptor.js         # MAIN-world XHR/Fetch hooks + window global scanning
-    popup.js               # Popup logic
-    results.js             # Dashboard logic with filtering and export
+    popup.js               # Popup logic, scope controls, pause/resume
+    results.js             # Dashboard logic with analytics, filtering, grouping, and export
+  eval/
+    dataset.js             # 24-case labeled synthetic evaluation dataset
+    benchmark.html         # Baseline vs. Enhanced benchmark runner (Precision/Recall/F1/FPR)
+    step0-tests.html       # Unit tests for utils, schema, and normalization
+    step1-tests.html       # Unit tests for context engine and risk scoring
   css/
     popup.css              # Popup styles
     results.css            # Dashboard styles
