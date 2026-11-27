@@ -2,6 +2,28 @@
 
 All notable changes to KeyFinder are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] - 2026-11-27
+
+### Added
+- **Context-aware detection engine** (`js/context.js`): classifies page environment (`production`, `dev-staging`, `localhost`, `docs-example`), extracts redacted context snippets, detects placeholder/test/public-by-design signals, detects minified/comment contexts, and performs local zero-egress JWT header/claim inspection (`exp`, `alg`, sensitive claims)
+- **Risk scoring & confidence** (`js/risk.js`): computes 0–100 `riskScore`, derived `riskLevel` (`critical`/`high`/`medium`/`low`/`info`), `confidence` (`high`/`medium`/`low`), and explainable `riskFactors` per finding
+- **Remediation guidance** (`js/remediation.js`): provider- and surface-specific remediation steps displayed in the expandable `why` row drawer on the dashboard
+- **Privacy & scope controls**: default secret masking in the dashboard (`show`/`mask` per-row toggle) and exports (`Mask Exports` toggle), Pause/Resume scanning toggle, and per-domain exclusion list in the popup
+- **Finding lifecycle & grouping**: per-finding status (`open`, `acknowledged`, `false-positive`, `resolved`) with filter dropdown, occurrence count (`×N`) tracking, and Group-by (`none`, `domain`, `pattern`) view
+- **Passive recon engine** (`js/recon.js`): detects `//# sourceMappingURL=` references, high-signal API/auth/admin/webhook endpoints, third-party script origins with SRI status, and cloud storage asset URLs (AWS S3, GCS, Azure Blob) in `recon.log`
+- **Analytics, report & config management**: `analytics.log` panel with top domains, exposure surface charts, and average risk score; Markdown report export (`↓ Report`); settings/keywords JSON export and import
+- **Evaluation suite** (`eval/`): 24-case labeled synthetic dataset (`eval/dataset.js`), baseline vs. enhanced benchmark runner (`eval/benchmark.html`) measuring Precision, Recall, F1, FPR, and scan latency, plus unit test runners (`eval/step0-tests.html`, `eval/step1-tests.html`)
+
+### Changed
+- Findings normalized to Schema v2 (`js/utils.js`) with `occurrenceCount`, `firstSeen`, `lastSeen`, `status`, `riskScore`, `riskLevel`, `riskFactors`, and `context`
+- Deduplication key changed to `(domain, url, patternName, match)`, incrementing `occurrenceCount` and updating `lastSeen` on repeat detections
+- `js/interceptor-loader.js` buffers up to 200 early `document_start` findings until `content.js` registers its receiver at `document_idle`
+- `js/interceptor.js` normalizes relative XHR/fetch URLs against `location.href`
+
+### Fixed
+- Azure SAS Token regex in `js/patterns.js` now matches `sig=` at the end of a URL without requiring a trailing `&`
+- Consolidated duplicated DOM allowlists and scan helpers in `js/content.js`
+
 ## [2.2.1] - 2026-07-18
 
 ### Changed
