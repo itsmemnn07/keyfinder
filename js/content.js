@@ -4,32 +4,53 @@
   const pageUrl = location.href;
   const pageDomain = location.hostname;
   const seen = new Set();
+  const fetchedScripts = new Set();
+  const { shannonEntropy, isHighEntropy, normalizeUrl } = KeyFinderUtils;
+  const ContextEngine = typeof KeyFinderContext !== "undefined" ? KeyFinderContext : null;
+  const RiskEngine = typeof KeyFinderRisk !== "undefined" ? KeyFinderRisk : null;
+  const ReconEngine = typeof KeyFinderRecon !== "undefined" ? KeyFinderRecon : null;
+  const reconSourceMaps = [];
+  const reconEndpoints = new Set();
 
   let keywords = [];
+  let settings = { paused: false, excludedDomains: [] };
   try {
-    const response = await chrome.runtime.sendMessage({ type: "getKeywords" });
-    keywords = (response.keywords || []).map((k) => k.toLowerCase());
+    const [kwResp, setResp] = await Promise.all([
+      chrome.runtime.sendMessage({ type: "getKeywords" }),
+      chrome.runtime.sendMessage({ type: "getSettings" }),
+    ]);
+    keywords = ((kwResp && kwResp.keywords) || []).map((k) => k.toLowerCase());
+    if (setResp && setResp.settings) settings = setResp.settings;
   } catch {
     return;
   }
 
-  function shannonEntropy(str) {
-    const len = str.length;
-    if (len === 0) return 0;
-    const freq = {};
-    for (const ch of str) freq[ch] = (freq[ch] || 0) + 1;
-    let entropy = 0;
-    for (const ch in freq) {
-      const p = freq[ch] / len;
-      entropy -= p * Math.log2(p);
-    }
-    return entropy;
+  const hostLower = pageDomain.toLowerCase();
+  const isExcluded = (settings.excludedDomains || []).some(
+    (d) => hostLower === d || hostLower.endsWith("." + d)
+  );
+  if (settings.paused || isExcluded) {
+    return;
   }
 
-  function isHighEntropy(str) {
-    if (str.length < 12) return false;
-    return shannonEntropy(str) > 3.5;
-  }
+  // Shared allowlists used by both initial DOM scan and MutationObserver
+  const CSRF_INPUT_NAMES = [
+    "authenticity_token", "csrf_token", "csrf", "_csrf", "__requestverificationtoken",
+    "csrfmiddlewaretoken", "react-codespace-csrf", "_token", "xsrf-token", "anticsrf",
+  ];
+  const BENIGN_INPUT_NAMES = [
+    "return_to", "redirect", "redirect_uri", "next", "ref", "referer",
+    "utm_source", "utm_medium", "utm_campaign", "notice_name", "host", "method",
+    "pinned_items_id_and_type[]", "repo_topics[]", "timestamp_secret",
+  ];
+  const SENSITIVE_INPUT_NAMES = [
+    "api_key", "apikey", "secret_key", "access_token", "private_key", "password",
+  ];
+  const IGNORED_DATA_ATTRS = [
+    "data-hotkey", "data-hotkey-scope", "data-hotkey-within",
+    "data-provider-key",
+    "data-pjax-key", "data-turbo-key",
+  ];
 
   function isFalsePositive(match) {
     if (!match || match.length < 8) return true;
@@ -53,13 +74,51 @@
   }
 
   function report(data) {
-    const key = `${data.type}:${data.match}:${data.url || ""}`;
+    const resolvedUrl = normalizeUrl(data.url || pageUrl, pageUrl);
+    const key = `${data.type}:${data.match}:${resolvedUrl}`;
     if (seen.has(key)) return;
     seen.add(key);
+
+    const { contextMeta, entropyTarget, ...cleanData } = data;
+    const entropyValue = shannonEntropy(entropyTarget || cleanData.match || "");
+
+    let finalFinding = {
+      ...cleanData,
+      url: resolvedUrl,
+      domain: pageDomain,
+      pageUrl,
+      timestamp: Date.now(),
+    };
+
+    if (ContextEngine) {
+      const ctx = ContextEngine.analyzeContext({
+        match: entropyTarget || cleanData.match,
+        url: resolvedUrl,
+        pageUrl,
+        type: cleanData.type,
+        patternName: cleanData.patternName,
+        provider: cleanData.provider,
+        keyName: contextMeta && contextMeta.keyName,
+        snippet: contextMeta && contextMeta.snippet,
+        inComment: contextMeta && contextMeta.inComment,
+        isMinified: contextMeta && contextMeta.isMinified,
+      });
+
+      if (ContextEngine.shouldSuppressFinding(finalFinding, ctx, () => entropyValue)) {
+        return;
+      }
+
+      if (RiskEngine) {
+        finalFinding = RiskEngine.evaluateFinding(finalFinding, ctx, entropyValue);
+      } else {
+        finalFinding.context = ctx;
+      }
+    }
+
     try {
       chrome.runtime.sendMessage({
         type: "finding",
-        data: { ...data, domain: pageDomain, pageUrl, timestamp: Date.now() },
+        data: finalFinding,
       });
     } catch {}
   }
@@ -67,20 +126,34 @@
   function scanText(text, sourceUrl, sourceType) {
     if (!text || text.length < 10) return;
 
+    if (ReconEngine && (sourceType === "inline-script" || sourceType === "external-script" || sourceType === "fetch-response" || sourceType === "xhr-response")) {
+      for (const ref of ReconEngine.extractSourceMapRefs(text, sourceUrl)) {
+        reconSourceMaps.push(ref);
+      }
+      for (const ep of ReconEngine.extractHighSignalEndpoints(text)) {
+        reconEndpoints.add(ep);
+      }
+    }
+
     for (const pattern of SECRET_PATTERNS) {
       pattern.re.lastIndex = 0;
       let m;
       while ((m = pattern.re.exec(text)) !== null) {
         const matched = m[1] || m[0];
         if (isFalsePositive(matched)) continue;
+        const contextMeta = ContextEngine
+          ? ContextEngine.extractTextContext(text, m.index, m[0].length, matched)
+          : null;
         report({
           url: sourceUrl,
           match: matched.substring(0, 200),
+          entropyTarget: matched,
           type: sourceType,
           patternName: pattern.name,
           severity: pattern.severity,
           confidence: pattern.confidence,
           provider: pattern.provider,
+          contextMeta,
         });
       }
     }
@@ -98,45 +171,69 @@
         if (isFalsePositive(val)) continue;
         // Skip values that look like JS function/method names (camelCase identifiers)
         if (/^[a-z][a-zA-Z0-9_]*$/.test(val) && val.length < 60) continue;
+        const contextMeta = ContextEngine
+          ? ContextEngine.extractTextContext(text, m.index, m[0].length, val)
+          : null;
+        if (contextMeta && !contextMeta.keyName) {
+          contextMeta.keyName = kw;
+        }
         report({
           url: sourceUrl,
           match: val.substring(0, 200),
+          entropyTarget: val,
           type: sourceType,
           patternName: `Keyword: ${kw}`,
           severity: "medium",
           confidence: isHighEntropy(val) ? "high" : "medium",
           provider: "Keyword Match",
+          contextMeta,
         });
       }
     }
   }
 
-  function scanScriptSrcUrls() {
-    const scripts = document.querySelectorAll("script[src]");
-    for (const script of scripts) {
-      const src = script.src;
-      if (!src) continue;
-      for (const kw of keywords) {
-        if (src.toLowerCase().includes(kw)) {
+  function scanScriptUrl(src) {
+    if (!src) return;
+    for (const kw of keywords) {
+      if (src.toLowerCase().includes(kw)) {
+        report({
+          url: src, match: src, type: "script-src",
+          patternName: `Script URL contains: ${kw}`,
+          severity: "medium", confidence: "medium", provider: "URL Scan",
+        });
+      }
+    }
+    try {
+      const url = new URL(src, pageUrl);
+      for (const [param, value] of url.searchParams) {
+        if (value.length >= 16 && isHighEntropy(value)) {
           report({
-            url: src, match: src, type: "script-src",
-            patternName: `Script URL contains: ${kw}`,
+            url: src, match: `${param}=${value.substring(0, 100)}`,
+            type: "url-param", patternName: "High-Entropy URL Parameter",
             severity: "medium", confidence: "medium", provider: "URL Scan",
           });
         }
       }
-      try {
-        const url = new URL(src);
-        for (const [param, value] of url.searchParams) {
-          if (value.length >= 16 && isHighEntropy(value)) {
-            report({
-              url: src, match: `${param}=${value.substring(0, 100)}`,
-              type: "url-param", patternName: "High-Entropy URL Parameter",
-              severity: "medium", confidence: "medium", provider: "URL Scan",
-            });
-          }
-        }
-      } catch {}
+    } catch {}
+  }
+
+  async function scanExternalScriptContent(src) {
+    try {
+      const resolved = new URL(src, pageUrl).href;
+      if (fetchedScripts.has(resolved)) return;
+      if (new URL(resolved).origin !== location.origin) return;
+      fetchedScripts.add(resolved);
+      const resp = await fetch(resolved, { credentials: "omit" });
+      if (!resp.ok) return;
+      const text = await resp.text();
+      scanText(text, resolved, "external-script");
+    } catch {}
+  }
+
+  function scanScriptSrcUrls() {
+    const scripts = document.querySelectorAll("script[src]");
+    for (const script of scripts) {
+      scanScriptUrl(script.src);
     }
   }
 
@@ -149,18 +246,8 @@
 
   async function scanExternalScripts() {
     const scripts = document.querySelectorAll("script[src]");
-    const fetched = new Set();
     for (const script of scripts) {
-      try {
-        const src = script.src;
-        if (fetched.has(src)) continue;
-        if (new URL(src).origin !== location.origin) continue;
-        fetched.add(src);
-        const resp = await fetch(src, { credentials: "omit" });
-        if (!resp.ok) continue;
-        const text = await resp.text();
-        scanText(text, src, "external-script");
-      } catch {}
+      await scanExternalScriptContent(script.src);
     }
   }
 
@@ -174,65 +261,66 @@
       if (sensitive.some((s) => name.includes(s))) {
         report({
           url: pageUrl, match: `meta[${name}]=${content.substring(0, 100)}`,
+          entropyTarget: content,
           type: "meta-tag", patternName: "Sensitive Meta Tag",
           severity: "high", confidence: "high", provider: "DOM Scan",
+          contextMeta: { keyName: name, snippet: `<meta name="${name}" content="[MATCH]">` },
         });
       }
       scanText(`${name}=${content}`, pageUrl, "meta-tag");
     }
   }
 
+  function scanHiddenInputElement(input) {
+    const name = (input.name || input.id || "").toLowerCase();
+    const value = input.value;
+    if (!value || value.length < 8) return;
+    // Skip known framework CSRF tokens — these are ephemeral anti-CSRF nonces, not secrets
+    if (CSRF_INPUT_NAMES.some((c) => name === c || name.startsWith(c))) return;
+    // Skip common non-secret hidden fields
+    if (BENIGN_INPUT_NAMES.some((b) => name === b || name.startsWith(b))) return;
+    if (SENSITIVE_INPUT_NAMES.some((s) => name.includes(s)) || isHighEntropy(value)) {
+      report({
+        url: pageUrl, match: `${name}=${value.substring(0, 100)}`,
+        entropyTarget: value,
+        type: "hidden-input", patternName: "Hidden Form Field",
+        severity: isHighEntropy(value) ? "high" : "medium",
+        confidence: SENSITIVE_INPUT_NAMES.some((s) => name.includes(s)) ? "high" : "medium",
+        provider: "DOM Scan",
+        contextMeta: { keyName: name, snippet: `<input type="hidden" name="${name}" value="[MATCH]">` },
+      });
+    }
+  }
+
   function scanHiddenInputs() {
     const inputs = document.querySelectorAll('input[type="hidden"]');
     for (const input of inputs) {
-      const name = (input.name || input.id || "").toLowerCase();
-      const value = input.value;
-      if (!value || value.length < 8) continue;
-      // Skip known framework CSRF tokens — these are ephemeral anti-CSRF nonces, not secrets
-      const csrfNames = ["authenticity_token", "csrf_token", "csrf", "_csrf", "__requestverificationtoken",
-        "csrfmiddlewaretoken", "react-codespace-csrf", "_token", "xsrf-token", "anticsrf"];
-      if (csrfNames.some((c) => name === c || name.startsWith(c))) continue;
-      // Skip common non-secret hidden fields
-      const benignNames = ["return_to", "redirect", "redirect_uri", "next", "ref", "referer",
-        "utm_source", "utm_medium", "utm_campaign", "notice_name", "host", "method",
-        "pinned_items_id_and_type[]", "repo_topics[]", "timestamp_secret"];
-      if (benignNames.some((b) => name === b || name.startsWith(b))) continue;
-      const sensitive = ["api_key", "apikey", "secret_key", "access_token", "private_key", "password"];
-      if (sensitive.some((s) => name.includes(s)) || isHighEntropy(value)) {
-        report({
-          url: pageUrl, match: `${name}=${value.substring(0, 100)}`,
-          type: "hidden-input", patternName: "Hidden Form Field",
-          severity: isHighEntropy(value) ? "high" : "medium",
-          confidence: sensitive.some((s) => name.includes(s)) ? "high" : "medium",
-          provider: "DOM Scan",
-        });
-      }
+      scanHiddenInputElement(input);
+    }
+  }
+
+  function scanElementDataAttributes(el) {
+    if (!el.attributes) return;
+    for (const attr of el.attributes) {
+      if (!/^data-.*(?:key|token|secret|auth|api|credential|password)/i.test(attr.name)) continue;
+      if (!attr.value || attr.value.length < 8) continue;
+      if (IGNORED_DATA_ATTRS.includes(attr.name)) continue;
+      if (/(?:Mod|Shift|Alt|Ctrl|Meta)\+/i.test(attr.value)) continue;
+      report({
+        url: pageUrl, match: `${attr.name}="${attr.value.substring(0, 100)}"`,
+        entropyTarget: attr.value,
+        type: "data-attribute", patternName: "Sensitive Data Attribute",
+        severity: "medium", confidence: isHighEntropy(attr.value) ? "high" : "medium",
+        provider: "DOM Scan",
+        contextMeta: { keyName: attr.name, snippet: `${attr.name}="[MATCH]"` },
+      });
     }
   }
 
   function scanDataAttributes() {
     const all = document.querySelectorAll("*");
-    // Attribute names that contain "key" but are not secrets
-    const ignoredAttrs = [
-      "data-hotkey", "data-hotkey-scope", "data-hotkey-within",  // Keyboard shortcuts
-      "data-provider-key",                                        // UI provider identifiers
-      "data-pjax-key", "data-turbo-key",                          // Framework routing keys
-    ];
     for (const el of all) {
-      for (const attr of el.attributes) {
-        if (!/^data-.*(?:key|token|secret|auth|api|credential|password)/i.test(attr.name)) continue;
-        if (!attr.value || attr.value.length < 8) continue;
-        // Skip known non-secret data attributes
-        if (ignoredAttrs.includes(attr.name)) continue;
-        // Skip if the value looks like a keyboard shortcut (contains Mod+, Shift+, etc.)
-        if (/(?:Mod|Shift|Alt|Ctrl|Meta)\+/i.test(attr.value)) continue;
-        report({
-          url: pageUrl, match: `${attr.name}="${attr.value.substring(0, 100)}"`,
-          type: "data-attribute", patternName: "Sensitive Data Attribute",
-          severity: "medium", confidence: isHighEntropy(attr.value) ? "high" : "medium",
-          provider: "DOM Scan",
-        });
-      }
+      scanElementDataAttributes(el);
     }
   }
 
@@ -321,10 +409,12 @@
           if (sensitive.some((s) => kl.includes(s)) || isHighEntropy(value.substring(0, 100))) {
             report({
               url: pageUrl, match: `${label}.${key}=${value.substring(0, 120)}`,
+              entropyTarget: value.substring(0, 120),
               type: "web-storage", patternName: `${label} Secret`,
               severity: "high",
               confidence: sensitive.some((s) => kl.includes(s)) ? "high" : "medium",
               provider: "Storage Scan",
+              contextMeta: { keyName: `${label}.${key}`, snippet: `${label}["${key}"] = [MATCH]` },
             });
           }
           scanText(`${key}=${value}`, pageUrl, "web-storage");
@@ -345,21 +435,18 @@
         if (value && value.length >= 16 && sensitive.some((s) => n.includes(s))) {
           report({
             url: pageUrl, match: `cookie:${name.trim()}=${value.substring(0, 80)}`,
+            entropyTarget: value,
             type: "cookie", patternName: "Sensitive Cookie",
             severity: "medium", confidence: "medium", provider: "Cookie Scan",
+            contextMeta: { keyName: name.trim(), snippet: `document.cookie: ${name.trim()}=[MATCH] (non-HttpOnly)` },
           });
         }
       }
     } catch {}
   }
 
-  const kfNonce = document.documentElement.getAttribute("data-kf-verify") || "";
-  document.documentElement.removeAttribute("data-kf-verify");
-
-  window.addEventListener("__kf_finding__", (e) => {
-    const data = e.detail;
+  function handleInterceptorEvent(data) {
     if (!data) return;
-    if (data.__kfNonce !== kfNonce) return;
 
     if (data.rawText) {
       scanText(data.rawText, data.sourceUrl || pageUrl, data.type);
@@ -367,17 +454,25 @@
     }
 
     if (data.match) {
+      const rawGlobalVal = data.match.includes("=") ? data.match.slice(data.match.indexOf("=") + 1) : data.match;
+      const globalName = data.match.includes("=") ? data.match.slice(0, data.match.indexOf("=")) : "";
       report({
         url: data.sourceUrl || pageUrl,
         match: data.match,
+        entropyTarget: rawGlobalVal,
         type: data.type,
         patternName: data.patternName || data.type,
         severity: data.severity || "medium",
         confidence: data.confidence || "medium",
         provider: data.provider || "Runtime Scan",
+        contextMeta: globalName ? { keyName: globalName, snippet: `${globalName} = [MATCH]` } : null,
       });
     }
-  });
+  }
+
+  if (typeof window.__kfRegisterReceiver === "function") {
+    window.__kfRegisterReceiver(handleInterceptorEvent);
+  }
 
   scanScriptSrcUrls();
   scanInlineScripts();
@@ -390,6 +485,25 @@
   scanCookies();
   await scanExternalScripts();
 
+  if (ReconEngine) {
+    const thirdPartyScripts = ReconEngine.collectThirdPartyScripts(document, location.origin);
+    if (thirdPartyScripts.length > 0 || reconSourceMaps.length > 0 || reconEndpoints.size > 0) {
+      try {
+        chrome.runtime.sendMessage({
+          type: "recon",
+          data: {
+            domain: pageDomain,
+            pageUrl,
+            thirdPartyScripts,
+            sourceMaps: reconSourceMaps,
+            endpoints: [...reconEndpoints],
+            timestamp: Date.now(),
+          },
+        });
+      } catch {}
+    }
+  }
+
   // Observe DOM mutations for SPA support
   const observer = new MutationObserver((mutations) => {
     for (const mutation of mutations) {
@@ -397,63 +511,21 @@
         if (node.nodeType !== Node.ELEMENT_NODE) continue;
         if (node.tagName === "SCRIPT") {
           if (node.src) {
-            // New external script added
-            for (const kw of keywords) {
-              if (node.src.toLowerCase().includes(kw)) {
-                report({
-                  url: node.src, match: node.src, type: "script-src",
-                  patternName: `Script URL contains: ${kw}`,
-                  severity: "medium", confidence: "medium", provider: "URL Scan",
-                });
-              }
-            }
+            scanScriptUrl(node.src);
+            scanExternalScriptContent(node.src);
           } else if (node.textContent) {
             scanText(node.textContent, pageUrl, "inline-script");
           }
         }
-        // Scan any new hidden inputs
         const hiddenInputs = node.matches && node.matches('input[type="hidden"]')
           ? [node]
           : (node.querySelectorAll ? Array.from(node.querySelectorAll('input[type="hidden"]')) : []);
         for (const input of hiddenInputs) {
-          const name = (input.name || input.id || "").toLowerCase();
-          const value = input.value;
-          if (!value || value.length < 8) continue;
-          // Skip known CSRF tokens
-          const csrfNames = ["authenticity_token", "csrf_token", "csrf", "_csrf", "__requestverificationtoken",
-            "csrfmiddlewaretoken", "react-codespace-csrf", "_token", "xsrf-token", "anticsrf"];
-          if (csrfNames.some((c) => name === c || name.startsWith(c))) continue;
-          const benignNames = ["return_to", "redirect", "redirect_uri", "next", "ref",
-            "notice_name", "host", "method", "pinned_items_id_and_type[]", "repo_topics[]", "timestamp_secret"];
-          if (benignNames.some((b) => name === b || name.startsWith(b))) continue;
-          const sensitive = ["api_key", "apikey", "secret_key", "access_token", "private_key", "password"];
-          if (sensitive.some((s) => name.includes(s)) || isHighEntropy(value)) {
-            report({
-              url: pageUrl, match: `${name}=${value.substring(0, 100)}`,
-              type: "hidden-input", patternName: "Hidden Form Field",
-              severity: isHighEntropy(value) ? "high" : "medium",
-              confidence: sensitive.some((s) => name.includes(s)) ? "high" : "medium",
-              provider: "DOM Scan",
-            });
-          }
+          scanHiddenInputElement(input);
         }
-        // Scan data attributes on new elements
         const elementsToCheck = node.querySelectorAll ? [node, ...node.querySelectorAll("*")] : [node];
-        const ignoredAttrsMut = ["data-hotkey", "data-hotkey-scope", "data-hotkey-within", "data-provider-key", "data-pjax-key", "data-turbo-key"];
         for (const el of elementsToCheck) {
-          if (!el.attributes) continue;
-          for (const attr of el.attributes) {
-            if (!/^data-.*(?:key|token|secret|auth|api|credential|password)/i.test(attr.name)) continue;
-            if (!attr.value || attr.value.length < 8) continue;
-            if (ignoredAttrsMut.includes(attr.name)) continue;
-            if (/(?:Mod|Shift|Alt|Ctrl|Meta)\+/i.test(attr.value)) continue;
-            report({
-              url: pageUrl, match: `${attr.name}="${attr.value.substring(0, 100)}"`,
-              type: "data-attribute", patternName: "Sensitive Data Attribute",
-              severity: "medium", confidence: isHighEntropy(attr.value) ? "high" : "medium",
-              provider: "DOM Scan",
-            });
-          }
+          scanElementDataAttributes(el);
         }
       }
     }

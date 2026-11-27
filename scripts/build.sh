@@ -11,11 +11,16 @@ mkdir -p "$DIST"
 SHARED_FILES=(
   js/background.js
   js/content.js
+  js/context.js
   js/interceptor.js
   js/interceptor-loader.js
   js/patterns.js
   js/popup.js
+  js/recon.js
+  js/remediation.js
   js/results.js
+  js/risk.js
+  js/utils.js
   css/popup.css
   css/results.css
   icons/icon16.png

@@ -10,6 +10,16 @@
     window.dispatchEvent(new CustomEvent(EVENT_NAME, { detail: data }));
   }
 
+  function resolveUrl(raw) {
+    const str = raw == null ? "" : String(raw);
+    if (!str) return location.href;
+    try {
+      return new URL(str, location.href).href;
+    } catch {
+      return str;
+    }
+  }
+
   function shannonEntropy(str) {
     const len = str.length;
     if (len === 0) return 0;
@@ -91,7 +101,7 @@
           if (body && body.length > 10 && body.length < 500000) {
             emit({
               type: "xhr-response",
-              sourceUrl: String(this._kfUrl || ""),
+              sourceUrl: resolveUrl(this._kfUrl),
               rawText: body,
             });
           }
@@ -113,7 +123,7 @@
           if (body && body.length > 10 && body.length < 500000) {
             emit({
               type: "fetch-response",
-              sourceUrl: String(url || ""),
+              sourceUrl: resolveUrl(url),
               rawText: body,
             });
           }

@@ -1,8 +1,17 @@
+if (typeof KeyFinderUtils === "undefined" && typeof importScripts === "function") {
+  importScripts("/js/utils.js");
+}
+
 const KEYWORDS_KEY = "kf_keywords";
 const FINDINGS_KEY = "kf_findings";
+const SETTINGS_KEY = "kf_settings";
+const RECON_KEY = "kf_recon";
 const MAX_FINDINGS = 5000;
+const MAX_RECON_DOMAINS = 200;
 const MAX_KEYWORDS = 50;
 const MAX_KEYWORD_LENGTH = 50;
+const VALID_STATUSES = new Set(["open", "acknowledged", "false_positive", "resolved"]);
+const DEFAULT_SETTINGS = { paused: false, excludedDomains: [] };
 
 const DEFAULT_KEYWORDS = [
   "key", "api_key", "apikey", "api-key", "secret", "token",
@@ -84,7 +93,8 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   if (details.reason === "install") {
     await chrome.storage.local.set({
       [KEYWORDS_KEY]: DEFAULT_KEYWORDS,
-      [FINDINGS_KEY]: []
+      [FINDINGS_KEY]: [],
+      [SETTINGS_KEY]: DEFAULT_SETTINGS,
     });
   }
 });
@@ -123,6 +133,30 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     getFindings().then((findings) => sendResponse({ findings }));
     return true;
   }
+  if (request.type === "getSettings") {
+    getSettings().then((settings) => sendResponse({ settings }));
+    return true;
+  }
+  if (request.type === "updateSettings") {
+    enqueue(() => updateSettings(request.patch || {})).then((settings) => sendResponse({ ok: true, settings }));
+    return true;
+  }
+  if (request.type === "updateFindingStatus") {
+    enqueue(() => updateFindingStatus(request.findingId, request.status)).then((result) => sendResponse(result));
+    return true;
+  }
+  if (request.type === "recon") {
+    enqueue(() => saveRecon(request.data)).then(() => sendResponse({ ok: true }));
+    return true;
+  }
+  if (request.type === "getRecon") {
+    getRecon().then((recon) => sendResponse({ recon }));
+    return true;
+  }
+  if (request.type === "clearRecon") {
+    enqueue(() => clearRecon()).then(() => sendResponse({ ok: true }));
+    return true;
+  }
 });
 
 async function getKeywords() {
@@ -154,13 +188,23 @@ async function getFindings() {
 
 async function saveFinding(finding) {
   const findings = await getFindings();
-  const isDuplicate = findings.some(
-    (f) => f.url === finding.url && f.match === finding.match
-  );
-  if (isDuplicate) return;
+  const normalized = KeyFinderUtils.normalizeFinding(finding);
+  const dedupeKey = KeyFinderUtils.getFindingDedupeKey(normalized);
 
-  finding.id = crypto.randomUUID();
-  findings.push(finding);
+  const existingIdx = findings.findIndex(
+    (f) => KeyFinderUtils.getFindingDedupeKey(KeyFinderUtils.normalizeFinding(f)) === dedupeKey
+  );
+  if (existingIdx !== -1) {
+    const existing = KeyFinderUtils.normalizeFinding(findings[existingIdx]);
+    existing.occurrenceCount = (existing.occurrenceCount || 1) + 1;
+    existing.lastSeen = normalized.timestamp;
+    findings[existingIdx] = existing;
+    await chrome.storage.local.set({ [FINDINGS_KEY]: findings });
+    return;
+  }
+
+  normalized.id = crypto.randomUUID();
+  findings.push(normalized);
 
   // Evict oldest findings when cap is exceeded
   if (findings.length > MAX_FINDINGS) {
@@ -184,4 +228,87 @@ async function removeFinding(findingId) {
 async function clearFindings() {
   await chrome.storage.local.set({ [FINDINGS_KEY]: [] });
   chrome.action.setBadgeText({ text: "" });
+  for (const tabId of [...alertTabs]) {
+    resetTabIcon(tabId);
+  }
+}
+
+async function getSettings() {
+  const result = await chrome.storage.local.get(SETTINGS_KEY);
+  const raw = result[SETTINGS_KEY] || {};
+  return {
+    paused: Boolean(raw.paused),
+    excludedDomains: Array.isArray(raw.excludedDomains) ? raw.excludedDomains : [],
+  };
+}
+
+async function updateSettings(patch) {
+  const current = await getSettings();
+  const next = {
+    paused: typeof patch.paused === "boolean" ? patch.paused : current.paused,
+    excludedDomains: Array.isArray(patch.excludedDomains)
+      ? [...new Set(patch.excludedDomains.map((d) => String(d).trim().toLowerCase()).filter(Boolean))]
+      : current.excludedDomains,
+  };
+  await chrome.storage.local.set({ [SETTINGS_KEY]: next });
+  return next;
+}
+
+async function updateFindingStatus(findingId, status) {
+  if (!VALID_STATUSES.has(status)) {
+    return { ok: false, error: "Invalid status." };
+  }
+  const findings = await getFindings();
+  const idx = findings.findIndex((f) => f.id === findingId);
+  if (idx === -1) return { ok: false, error: "Finding not found." };
+  findings[idx] = { ...findings[idx], status };
+  await chrome.storage.local.set({ [FINDINGS_KEY]: findings });
+  return { ok: true };
+}
+
+async function getRecon() {
+  const result = await chrome.storage.local.get(RECON_KEY);
+  return result[RECON_KEY] || {};
+}
+
+async function saveRecon(payload) {
+  if (!payload || !payload.domain) return;
+  const recon = await getRecon();
+  const domain = String(payload.domain).toLowerCase();
+  const existing = recon[domain] || {
+    domain,
+    thirdPartyScripts: [],
+    sourceMaps: [],
+    endpoints: [],
+    lastSeen: 0,
+  };
+
+  const mergeBy = (arr, items, keyFn, cap) => {
+    const map = new Map(arr.map((x) => [keyFn(x), x]));
+    for (const item of items || []) {
+      map.set(keyFn(item), item);
+      if (map.size >= cap) break;
+    }
+    return [...map.values()].slice(0, cap);
+  };
+
+  existing.thirdPartyScripts = mergeBy(existing.thirdPartyScripts, payload.thirdPartyScripts, (x) => x.origin, 50);
+  existing.sourceMaps = mergeBy(existing.sourceMaps, payload.sourceMaps, (x) => x.mapUrl, 30);
+  existing.endpoints = mergeBy(existing.endpoints, payload.endpoints, (x) => x, 80);
+  existing.lastSeen = payload.timestamp || Date.now();
+  recon[domain] = existing;
+
+  const domains = Object.keys(recon);
+  if (domains.length > MAX_RECON_DOMAINS) {
+    domains.sort((a, b) => (recon[a].lastSeen || 0) - (recon[b].lastSeen || 0));
+    for (const old of domains.slice(0, domains.length - MAX_RECON_DOMAINS)) {
+      delete recon[old];
+    }
+  }
+
+  await chrome.storage.local.set({ [RECON_KEY]: recon });
+}
+
+async function clearRecon() {
+  await chrome.storage.local.set({ [RECON_KEY]: {} });
 }

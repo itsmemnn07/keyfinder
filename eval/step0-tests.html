@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>KeyFinder Step 0 Unit Tests</title>
+  <style>
+    body { font-family: ui-monospace, monospace; background: #05070c; color: #d6dde8; padding: 24px; max-width: 820px; margin: 0 auto; }
+    h1 { font-size: 16px; margin-bottom: 12px; color: #fff; }
+    .summary { padding: 10px 14px; border: 1px solid #1a2233; background: #090d14; margin-bottom: 16px; }
+    .pass { color: #3ddc97; }
+    .fail { color: #ff5c5c; }
+    ul { list-style: none; padding: 0; }
+    li { padding: 6px 10px; border-bottom: 1px solid #1a2233; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h1>KeyFinder — Step 0 Baseline &amp; Schema Unit Tests</h1>
+  <div id="summary" class="summary">Running...</div>
+  <ul id="results"></ul>
+
+  <script src="../js/utils.js"></script>
+  <script src="../js/patterns.js"></script>
+  <script>
+    (function () {
+      const resultsEl = document.getElementById("results");
+      const summaryEl = document.getElementById("summary");
+      let passed = 0;
+      let failed = 0;
+
+      function assert(condition, name, detail = "") {
+        const li = document.createElement("li");
+        if (condition) {
+          passed++;
+          li.className = "pass";
+          li.textContent = "PASS: " + name;
+        } else {
+          failed++;
+          li.className = "fail";
+          li.textContent = "FAIL: " + name + (detail ? " -> " + detail : "");
+        }
+        resultsEl.appendChild(li);
+      }
+
+      const U = window.KeyFinderUtils;
+      assert(Boolean(U), "KeyFinderUtils global is exposed");
+
+      // Entropy tests
+      assert(U.shannonEntropy("") === 0, "shannonEntropy empty string is 0");
+      assert(U.isHighEntropy("aaaaaaaaaaaa") === false, "isHighEntropy rejects repeated single char");
+      assert(U.isHighEntropy("aB3$kL9!pQ2#xZ8@") === true, "isHighEntropy accepts random 16-char string");
+
+      // URL normalization tests
+      assert(
+        U.normalizeUrl("/api/config.json", "https://app.example.com/dashboard") === "https://app.example.com/api/config.json",
+        "normalizeUrl resolves relative path against pageUrl"
+      );
+      assert(
+        U.normalizeUrl("/api/config.json", "https://other.example.org/") === "https://other.example.org/api/config.json",
+        "normalizeUrl isolates identical relative paths across different domains"
+      );
+
+      // Masking tests
+      assert(U.maskSecret("AKIAIOSFODNN7EXAMPLE") === "AKIAI****MPLE", "maskSecret preserves short prefix/suffix", U.maskSecret("AKIAIOSFODNN7EXAMPLE"));
+      assert(U.maskSecret("short") === "*****", "maskSecret fully masks strings <= 8 chars");
+
+      // Finding Schema v2 normalization & dedupe tests
+      const f1 = U.normalizeFinding({
+        url: "/api/config.json",
+        pageUrl: "https://site-a.test/home",
+        match: "AIzaSyDummyTestKey000000000000000000000",
+        type: "fetch-response",
+        patternName: "Google API Key",
+        severity: "high",
+        provider: "Google",
+        timestamp: 1000,
+      });
+      const f2 = U.normalizeFinding({
+        url: "/api/config.json",
+        pageUrl: "https://site-b.test/home",
+        match: "AIzaSyDummyTestKey000000000000000000000",
+        type: "fetch-response",
+        patternName: "Google API Key",
+        severity: "high",
+        provider: "Google",
+        timestamp: 2000,
+      });
+      assert(f1.schemaVersion === 2, "normalizeFinding sets schemaVersion = 2");
+      assert(f1.domain === "site-a.test", "normalizeFinding infers domain from pageUrl");
+      assert(f1.status === "open" && f1.occurrenceCount === 1, "normalizeFinding sets default status and occurrenceCount");
+      assert(
+        U.getFindingDedupeKey(f1) !== U.getFindingDedupeKey(f2),
+        "getFindingDedupeKey does not collide across different domains for identical relative paths"
+      );
+
+      // Pattern regression test: Azure SAS at end of URL without trailing &
+      const sasPattern = SECRET_PATTERNS.find((p) => p.name === "Azure SAS Token");
+      assert(Boolean(sasPattern), "Azure SAS Token pattern exists");
+      sasPattern.re.lastIndex = 0;
+      const sasTrailing = "https://acct.blob.core.windows.net/c/b?sv=2023-01-01&sig=MockBase64Signature123456";
+      assert(sasPattern.re.test(sasTrailing) === true, "Azure SAS Token matches sig= at end of URL without trailing &");
+
+      summaryEl.textContent = `${passed} passed, ${failed} failed`;
+      summaryEl.className = "summary " + (failed === 0 ? "pass" : "fail");
+    })();
+  </script>
+</body>
+</html>
