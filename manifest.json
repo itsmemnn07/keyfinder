@@ -42,5 +42,16 @@
       "matches": ["<all_urls>"]
     }
   ],
-  "permissions": ["activeTab", "storage"]
+  "optional_permissions": [
+    "*://www.virustotal.com/*",
+    "*://safebrowsing.googleapis.com/*",
+    "*://api.any.run/*",
+    "*://urlscan.io/*",
+    "*://api.phishtank.com/*",
+    "*://otx.alienvault.com/*",
+    "*://api.securitytrails.com/*",
+    "*://api.shodan.io/*",
+    "*://censys.io/*"
+  ],
+
 }

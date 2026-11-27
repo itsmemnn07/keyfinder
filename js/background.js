@@ -1,5 +1,6 @@
 if (typeof KeyFinderUtils === "undefined" && typeof importScripts === "function") {
   importScripts("/js/utils.js");
+  importScripts("/js/providers.js");
 }
 
 const KEYWORDS_KEY = "kf_keywords";
@@ -11,7 +12,26 @@ const MAX_RECON_DOMAINS = 200;
 const MAX_KEYWORDS = 50;
 const MAX_KEYWORD_LENGTH = 50;
 const VALID_STATUSES = new Set(["open", "acknowledged", "false_positive", "resolved"]);
-const DEFAULT_SETTINGS = { paused: false, excludedDomains: [] };
+const DEFAULT_SETTINGS = {
+  paused: false,
+  excludedDomains: [],
+  external: {
+    enabled: false,
+    autoCheck: false,
+    providers: {
+      virusTotal: { enabled: false, apiKey: "" },
+      safeBrowsing: { enabled: false, apiKey: "" },
+      anyRun: { enabled: false, apiKey: "" },
+      urlscan: { enabled: false, apiKey: "" },
+      phishTank: { enabled: false, apiKey: "" },
+      otx: { enabled: false, apiKey: "" },
+      securityTrails: { enabled: false, apiKey: "" },
+      shodan: { enabled: false, apiKey: "" },
+      censys: { enabled: false, apiKey: "" },
+      openPhish: { enabled: false }
+    }
+  }
+};
 
 const DEFAULT_KEYWORDS = [
   "key", "api_key", "apikey", "api-key", "secret", "token",
@@ -84,7 +104,16 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   }
 });
 
-// Clean up when a tab is closed
+async function migrateFindings() {
+  const findings = await getFindings();
+  const normalized = findings.map((f) => KeyFinderUtils.normalizeFinding(f));
+  await chrome.storage.local.set({ [FINDINGS_KEY]: normalized });
+}
+
+chrome.runtime.onStartup.addListener(() => {
+  migrateFindings();
+});
+
 chrome.tabs.onRemoved.addListener((tabId) => {
   alertTabs.delete(tabId);
 });
@@ -187,6 +216,56 @@ async function getFindings() {
 }
 
 async function saveFinding(finding) {
+  // Normalize and store the finding (deduplication handled below)
+  const findings = await getFindings();
+  const normalized = KeyFinderUtils.normalizeFinding(finding);
+  const dedupeKey = KeyFinderUtils.getFindingDedupeKey(normalized);
+  const existingIdx = findings.findIndex(
+    (f) => KeyFinderUtils.getFindingDedupeKey(KeyFinderUtils.normalizeFinding(f)) === dedupeKey
+  );
+  if (existingIdx !== -1) {
+    const existing = KeyFinderUtils.normalizeFinding(findings[existingIdx]);
+    existing.occurrenceCount = (existing.occurrenceCount || 1) + 1;
+    existing.lastSeen = normalized.timestamp;
+    // Update the stored entry
+    findings[existingIdx] = existing;
+  } else {
+    findings.push(normalized);
+  }
+  await chrome.storage.local.set({ [FINDINGS_KEY]: findings });
+
+  // *** External reputation check ***
+  // If the finding is critical and high‑confidence, and auto‑check is on,
+  // trigger external providers for the associated URL/domain/IP.
+  try {
+    const settings = (await chrome.storage.local.get(SETTINGS_KEY))[SETTINGS_KEY] || {};
+    const ext = settings.external || {};
+    if (ext.enabled && ext.autoCheck && normalized.riskLevel === 'critical' && normalized.confidence === 'high') {
+      // Determine indicator type
+      let indicator = normalized.url || normalized.domain || '';
+      let type = 'url';
+      if (indicator.startsWith('http')) {
+        type = 'url';
+      } else if (/^(?:\d{1,3}\.){3}\d{1,3}$/.test(indicator)) {
+        type = 'ip';
+      } else {
+        type = 'domain';
+      }
+      // Dynamically import manager (works in service worker)
+      importScripts('/js/providerManager.js');
+      const results = await runExternalChecks(indicator, type);
+      // Attach results to the finding (reconResults array)
+      normalized.reconResults = results;
+      // Persist updated finding
+      await chrome.storage.local.set({ [FINDINGS_KEY]: findings });
+    }
+  } catch (e) {
+    console.error('External recon error:', e);
+  }
+
+  return { ok: true };
+}
+
   const findings = await getFindings();
   const normalized = KeyFinderUtils.normalizeFinding(finding);
   const dedupeKey = KeyFinderUtils.getFindingDedupeKey(normalized);
